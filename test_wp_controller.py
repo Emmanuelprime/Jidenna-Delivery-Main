@@ -25,7 +25,7 @@ from jidenna.jidenna_logger      import CsvLogger
 PORT = "/dev/ttyUSB0"
 
 TARGET_X = 2.0                      # waypoint x (m, relative to start)
-TARGET_Y = -1.00                      # waypoint y (m, relative to start)
+TARGET_Y = 1.00                      # waypoint y (m, relative to start)
 
 V_MAX = 0.15                         # max forward speed (m/s)
 W_MAX = 0.50                         # max turn rate (rad/s)
