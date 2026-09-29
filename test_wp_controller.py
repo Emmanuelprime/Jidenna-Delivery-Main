@@ -24,8 +24,8 @@ from jidenna.jidenna_logger      import CsvLogger
 # PORT = "COM19"
 PORT = "/dev/ttyUSB0"
 
-TARGET_X = 1.0                      # waypoint x (m, relative to start)
-TARGET_Y = 0.00                      # waypoint y (m, relative to start)
+TARGET_X = 0.30                      # waypoint x (m, relative to start)
+TARGET_Y = 0.30                      # waypoint y (m, relative to start)
 
 V_MAX = 0.15                         # max forward speed (m/s)
 W_MAX = 0.50                         # max turn rate (rad/s)
@@ -34,7 +34,7 @@ GOAL_TOLERANCE = 0.10                # "reached" radius (m)
 
 LOG_PATH = "runs/live_test_01.csv"   # set to None to disable logging
 
-RUN_TIMEOUT_S = 30.0                 # hard timeout for the whole run
+RUN_TIMEOUT_S = 30.0
 PRINT_HZ      = 4
 
 # =============================================================================
@@ -53,7 +53,6 @@ def main() -> int:
     print(f"  log       : {LOG_PATH}")
     print("=" * 70)
 
-    # ---- Construct everything ------------------------------------------
     bridge = JidennaBridge(PORT)
     pose   = JidennaPose(bridge)
 
@@ -80,7 +79,6 @@ def main() -> int:
     bridge.start()
     pose.start()
 
-    # Wait for connection (Nano takes ~6 s: bootloader + gyro calibration)
     t0 = time.time()
     while not bridge.is_connected() and time.time() - t0 < 15.0:
         time.sleep(0.1)
@@ -126,14 +124,14 @@ def main() -> int:
                 o = mgr.get_last_output()
                 state = o.info.get("state", "?")
                 dist  = o.info.get("distance", 0.0)
+                herr  = math.degrees(o.info.get("heading_error", 0.0))
                 print(f"  t={elapsed:5.1f}s  "
                       f"pose=({p.x:+.3f},{p.y:+.3f},{math.degrees(p.th):+6.1f}°)  "
                       f"v={o.v:+.2f} w={o.w:+.2f}  "
-                      f"state={state:7s}  dist={dist:.3f}")
+                      f"state={state:7s}  "
+                      f"dist={dist:.3f}  herr={herr:+6.1f}°")
 
-            # Check for done
             if mgr.wait_until_done(timeout=0.1):
-                # Verify by actual distance, not just the done signal
                 p = pose.get_pose()
                 err = math.hypot(TARGET_X - p.x, TARGET_Y - p.y)
                 if err < GOAL_TOLERANCE * 1.5:

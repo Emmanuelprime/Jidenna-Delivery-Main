@@ -4,7 +4,11 @@ jidenna_controller.py
 Runs a controller at a fixed rate against a live JidennaPose,
 sending (v, w) to the bridge.
 
-The controller itself is pluggable — see jidenna/controllers/.
+Frame translation:
+    Controllers work in the EKF/ROS frame (theta CCW+, w CCW+).
+    The Nano's set_velocity expects CW+ w (positive = right turn).
+    The manager flips w here, so every controller can use the
+    standard robotics convention.
 """
 
 from __future__ import annotations
@@ -19,18 +23,6 @@ from jidenna.controllers.base import ControlOutput, Controller
 
 
 class ControllerManager:
-    """
-    Runs a controller at a fixed rate against a live JidennaPose,
-    sending (v, w) to the bridge.
-
-    Usage:
-        ctrl = WaypointController()
-        mgr  = ControllerManager(bridge, pose, ctrl)
-        ctrl.set_target(2.0, 0.0)   # set target BEFORE start
-        mgr.start()
-        mgr.wait_until_done()
-        mgr.stop()
-    """
 
     def __init__(self,
                  bridge: JidennaBridge,
@@ -54,7 +46,7 @@ class ControllerManager:
         if self._thread is not None:
             return
         self._stop_evt.clear()
-        self._done_evt.clear()          # don't carry a stale done signal
+        self._done_evt.clear()
         # NOTE: do NOT call controller.reset() here. The caller sets
         # the target before start(), and reset() would wipe it.
         self._thread = threading.Thread(
@@ -71,10 +63,7 @@ class ControllerManager:
         except Exception:
             pass
 
-    # ---- waiting / introspection ----------------------------------------
-
     def wait_until_done(self, timeout: Optional[float] = None) -> bool:
-        """Block until the controller reports done. Returns True if done."""
         return self._done_evt.wait(timeout=timeout)
 
     def get_last_output(self) -> ControlOutput:
@@ -95,8 +84,12 @@ class ControllerManager:
             pose = self._pose.get_pose()
             output = self._controller.compute(pose)
 
+            # Controllers work in EKF/ROS frame (CCW+ w).
+            # The Nano's set_velocity expects CW+ w. Flip here.
+            w_hw = -output.w
+
             try:
-                self._bridge.set_velocity(output.v, output.w)
+                self._bridge.set_velocity(output.v, w_hw)
             except Exception as e:
                 print(f"[ControllerManager] set_velocity error: {e}")
 
@@ -108,7 +101,6 @@ class ControllerManager:
             else:
                 self._done_evt.clear()
 
-        # Final safety stop on exit
         try:
             self._bridge.set_velocity(0.0, 0.0)
         except Exception:

@@ -13,10 +13,6 @@ from typing import Protocol
 from ..jidenna_pose import PoseEstimate
 
 
-# ---------------------------------------------------------------------------
-# Output type — every controller returns one of these
-# ---------------------------------------------------------------------------
-
 @dataclass
 class ControlOutput:
     v: float = 0.0
@@ -25,23 +21,13 @@ class ControlOutput:
     info: dict = field(default_factory=dict)
 
 
-# ---------------------------------------------------------------------------
-# Controller protocol — every controller implements this
-# ---------------------------------------------------------------------------
-
 class Controller(Protocol):
     def reset(self) -> None:
-        """Clear internal state. Called on start and target changes."""
         ...
 
     def compute(self, pose: PoseEstimate) -> ControlOutput:
-        """Given the current pose, return (v, w, done)."""
         ...
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def wrap_angle(a: float) -> float:
     while a >  math.pi: a -= 2.0 * math.pi
