@@ -1,12 +1,21 @@
 """
 test_wp_controller.py
 
-Single-waypoint live test. Press Play in VSCode to run.
+Interactive single-waypoint live test. Press Play in VSCode to run.
 
-Edit the CONFIG block below, then hit Run. Ctrl-C to abort at any time.
+Type a target as "x y" (e.g. "0.3 0.5"), press Enter, and the robot
+drives there. When it arrives, type the next target.
+
+Commands:
+    <x> <y>     drive to (x, y)
+    r           reset pose estimate to (0, 0, 0) and re-anchor IMU
+    s / stop    emergency stop (zero velocity, keep session alive)
+    q / quit    quit cleanly
+    h / help    show this help
 """
 
 import math
+import sys
 import time
 from pathlib import Path
 
@@ -21,38 +30,100 @@ from jidenna.jidenna_logger      import CsvLogger
 # CONFIG — edit these
 # =============================================================================
 
-# PORT = "COM19"
+# PORT = "COM19"                       # or "/dev/ttyUSB0" on Linux
 PORT = "/dev/ttyUSB0"
-
-TARGET_X = 2.0                     # waypoint x (m, relative to start)
-TARGET_Y = -1                      # waypoint y (m, relative to start)
 
 V_MAX = 0.15                         # max forward speed (m/s)
 W_MAX = 0.50                         # max turn rate (rad/s)
 
 GOAL_TOLERANCE = 0.10                # "reached" radius (m)
 
-LOG_PATH = "runs/live_test_01.csv"   # set to None to disable logging
+LOG_PATH = "runs/live_session_01.csv"   # set to None to disable
 
-RUN_TIMEOUT_S = 30.0
-PRINT_HZ      = 4
+RUN_TIMEOUT_S = 60.0                 # per-waypoint timeout
+PRINT_HZ      = 4                    # live pose print rate
 
 # =============================================================================
 # DO NOT EDIT BELOW
 # =============================================================================
 
 
+def parse_target(line: str):
+    """Parse 'x y' into (x, y). Returns None on failure."""
+    parts = line.replace(",", " ").split()
+    if len(parts) != 2:
+        return None
+    try:
+        return (float(parts[0]), float(parts[1]))
+    except ValueError:
+        return None
+
+
+def print_help():
+    print("  Commands:")
+    print("    <x> <y>     drive to (x, y)")
+    print("    r           reset pose estimate to (0, 0, 0)")
+    print("    s / stop    emergency stop")
+    print("    q / quit    quit cleanly")
+    print("    h / help    show this help")
+
+
+def run_waypoint(mgr, pose, ctrl, target_x, target_y,
+                 goal_tolerance, timeout_s, print_hz):
+    """Drive to one waypoint. Returns True if reached."""
+    print(f"\n>>> target ({target_x:+.3f}, {target_y:+.3f})")
+    ctrl.set_target(target_x, target_y)
+
+    t_start = time.time()
+    last_print = 0.0
+    print_period = 1.0 / print_hz
+
+    while True:
+        now = time.time()
+        elapsed = now - t_start
+
+        if elapsed > timeout_s:
+            print(f"TIMEOUT after {elapsed:.1f}s")
+            return False
+
+        if now - last_print >= print_period:
+            last_print = now
+            p = pose.get_pose()
+            o = mgr.get_last_output()
+            state = o.info.get("state", "?")
+            dist  = o.info.get("distance", 0.0)
+            herr  = math.degrees(o.info.get("heading_error", 0.0))
+            print(f"  t={elapsed:5.1f}s  "
+                  f"pose=({p.x:+.3f},{p.y:+.3f},{math.degrees(p.th):+6.1f}°)  "
+                  f"v={o.v:+.2f} w={o.w:+.2f}  "
+                  f"state={state:7s}  "
+                  f"dist={dist:.3f}  herr={herr:+6.1f}°")
+
+        if mgr.wait_until_done(timeout=0.1):
+            p = pose.get_pose()
+            err = math.hypot(target_x - p.x, target_y - p.y)
+            ok = err < goal_tolerance * 1.5
+            if ok:
+                print(f"  ✓ reached ({p.x:+.3f}, {p.y:+.3f})  err={err:.3f} m")
+            else:
+                print(f"  WARNING: controller reported done but error is "
+                      f"{err:.3f} m")
+            return ok
+
+
 def main() -> int:
     print("=" * 70)
-    print(f"Jidenna single-waypoint live test")
+    print(f"Jidenna interactive waypoint controller")
     print(f"  port      : {PORT}")
-    print(f"  target    : ({TARGET_X:+.2f}, {TARGET_Y:+.2f})")
     print(f"  v_max     : {V_MAX} m/s")
     print(f"  w_max     : {W_MAX} rad/s")
     print(f"  tolerance : {GOAL_TOLERANCE} m")
     print(f"  log       : {LOG_PATH}")
     print("=" * 70)
+    print_help()
+    print()
 
+    # ---- Construct ------------------------------------------------------
     bridge = JidennaBridge(PORT)
     pose   = JidennaPose(bridge)
 
@@ -69,8 +140,7 @@ def main() -> int:
 
     logger = None
     if LOG_PATH:
-        logger = CsvLogger(Path(LOG_PATH),
-                           comment=f"live test to ({TARGET_X},{TARGET_Y})")
+        logger = CsvLogger(Path(LOG_PATH), comment="interactive session")
         bridge.add_telemetry_callback(logger)
         pose.add_pose_callback(logger.on_pose)
 
@@ -90,59 +160,71 @@ def main() -> int:
         return 1
 
     p0 = pose.get_pose()
-    print(f"Connected. Initial pose: x={p0.x:+.3f} y={p0.y:+.3f} th={p0.th:+.3f}")
+    print(f"Connected. Initial pose: x={p0.x:+.3f} y={p0.y:+.3f} "
+          f"th={math.degrees(p0.th):+.1f}°")
+    print()
 
-    # ---- Countdown ------------------------------------------------------
-    print("Starting in 3 s... (Ctrl-C to abort)")
-    for i in [3, 2, 1]:
-        print(f"  {i}...")
-        time.sleep(1.0)
-
-    # ---- Set target BEFORE starting the manager -------------------------
-    print(f"GO: target ({TARGET_X:+.2f}, {TARGET_Y:+.2f})")
-    ctrl.set_target(TARGET_X, TARGET_Y)
-    mgr.start()
-
-    # ---- Drive ----------------------------------------------------------
-    t_start = time.time()
-    last_print = 0.0
-    print_period = 1.0 / PRINT_HZ
-    reached = False
-
+    # ---- Interactive loop -----------------------------------------------
     try:
         while True:
-            now = time.time()
-            elapsed = now - t_start
-
-            if elapsed > RUN_TIMEOUT_S:
-                print(f"TIMEOUT after {elapsed:.1f}s. Aborting.")
+            # Read target from user
+            try:
+                line = input("target> ").strip()
+            except EOFError:
+                print("\nEOF, quitting.")
                 break
 
-            if now - last_print >= print_period:
-                last_print = now
-                p = pose.get_pose()
-                o = mgr.get_last_output()
-                state = o.info.get("state", "?")
-                dist  = o.info.get("distance", 0.0)
-                herr  = math.degrees(o.info.get("heading_error", 0.0))
-                print(f"  t={elapsed:5.1f}s  "
-                      f"pose=({p.x:+.3f},{p.y:+.3f},{math.degrees(p.th):+6.1f}°)  "
-                      f"v={o.v:+.2f} w={o.w:+.2f}  "
-                      f"state={state:7s}  "
-                      f"dist={dist:.3f}  herr={herr:+6.1f}°")
+            if not line:
+                continue
 
-            if mgr.wait_until_done(timeout=0.1):
-                p = pose.get_pose()
-                err = math.hypot(TARGET_X - p.x, TARGET_Y - p.y)
-                if err < GOAL_TOLERANCE * 1.5:
-                    reached = True
-                else:
-                    print(f"  WARNING: controller reported done but error is "
-                          f"{err:.3f} m (tolerance {GOAL_TOLERANCE})")
+            # Commands
+            low = line.lower()
+            if low in ("q", "quit", "exit"):
+                print("Quitting.")
                 break
+            if low in ("h", "help", "?"):
+                print_help()
+                continue
+            if low in ("s", "stop"):
+                print("Emergency stop.")
+                bridge.set_velocity(0.0, 0.0)
+                continue
+            if low == "r":
+                pose.reset(0.0, 0.0, 0.0)
+                # Also reset Nano's odom so telemetry matches
+                bridge.reset_odometry()
+                time.sleep(0.3)
+                p = pose.get_pose()
+                print(f"Reset. Pose now: x={p.x:+.3f} y={p.y:+.3f} "
+                      f"th={math.degrees(p.th):+.1f}°")
+                continue
+
+            # Parse as a target
+            tgt = parse_target(line)
+            if tgt is None:
+                print(f"  Could not parse '{line}'. Type two numbers "
+                      f"(e.g. '0.3 0.5') or 'h' for help.")
+                continue
+
+            tx, ty = tgt
+            p = pose.get_pose()
+            dist = math.hypot(tx - p.x, ty - p.y)
+            print(f"Current pose: ({p.x:+.3f}, {p.y:+.3f}, "
+                  f"{math.degrees(p.th):+.1f}°)")
+            print(f"Target      : ({tx:+.3f}, {ty:+.3f})  dist={dist:.3f} m")
+
+            # Drive to it
+            mgr.start()   # no-op if already running
+            run_waypoint(mgr, pose, ctrl, tx, ty,
+                         GOAL_TOLERANCE, RUN_TIMEOUT_S, PRINT_HZ)
+            # Leave the manager running so it keeps sending 0,0 after done.
+            # (The controller reports done and commands v=w=0.)
+
     except KeyboardInterrupt:
         print("\nCtrl-C received. Stopping.")
+
     finally:
+        print("Shutting down...")
         try:
             bridge.set_velocity(0.0, 0.0)
         except Exception:
@@ -151,21 +233,9 @@ def main() -> int:
         bridge.stop()
         if logger:
             logger.close()
+            print(f"Log saved: {LOG_PATH}  ({logger.count} samples)")
 
-    # ---- Summary --------------------------------------------------------
-    print()
-    print("=" * 70)
-    pf = pose.get_pose()
-    err = math.hypot(TARGET_X - pf.x, TARGET_Y - pf.y)
-    print(f"Final pose: x={pf.x:+.3f}  y={pf.y:+.3f}  th={math.degrees(pf.th):+6.1f}°")
-    print(f"Target    : x={TARGET_X:+.3f}  y={TARGET_Y:+.3f}")
-    print(f"Error     : {err:.3f} m")
-    print(f"Result    : {'REACHED' if reached else 'NOT REACHED'}")
-    if logger:
-        print(f"Log saved : {LOG_PATH}  ({logger.count} samples)")
-    print("=" * 70)
-
-    return 0 if reached else 1
+    return 0
 
 
 if __name__ == "__main__":
