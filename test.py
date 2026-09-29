@@ -2,7 +2,7 @@ import serial
 import time
 import sys
 
-PORT = "COM19"
+PORT = "/dev/ttyUSB0"
 BAUD = 115200
 
 V_MAX = 0.8   # must match firmware V_MAX_REAL
