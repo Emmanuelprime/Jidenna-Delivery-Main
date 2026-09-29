@@ -6,9 +6,13 @@ sending (v, w) to the bridge.
 
 Frame translation:
     Controllers work in the EKF/ROS frame (theta CCW+, w CCW+).
-    The Nano's set_velocity expects CW+ w (positive = right turn).
-    The manager flips w here, so every controller can use the
-    standard robotics convention.
+    The Nano's set_velocity expects CW+ w. The manager flips w here.
+
+Target-change detection:
+    If the controller exposes `get_generation()`, the manager uses it
+    to detect when the target has changed and clears the done signal
+    automatically. This prevents stale "done" from a previous waypoint
+    from being reported immediately on a new one.
 """
 
 from __future__ import annotations
@@ -40,6 +44,9 @@ class ControllerManager:
         self._last_output: ControlOutput = ControlOutput()
         self._last_output_lock = threading.Lock()
 
+        # Target-change detection
+        self._last_generation = -1
+
     # ---- lifecycle ------------------------------------------------------
 
     def start(self) -> None:
@@ -47,7 +54,8 @@ class ControllerManager:
             return
         self._stop_evt.clear()
         self._done_evt.clear()
-        # NOTE: do NOT call controller.reset() here. The caller sets
+        self._last_generation = -1        # force generation check on first tick
+        # NOTE: do NOT call controller.reset() here — the caller sets
         # the target before start(), and reset() would wipe it.
         self._thread = threading.Thread(
             target=self._loop, name="jidenna-ctrl", daemon=True)
@@ -81,6 +89,12 @@ class ControllerManager:
                 continue
             next_t += self._period
 
+            # Detect target changes and clear stale done signal
+            gen = getattr(self._controller, "get_generation", lambda: 0)()
+            if gen != self._last_generation:
+                self._last_generation = gen
+                self._done_evt.clear()
+
             pose = self._pose.get_pose()
             output = self._controller.compute(pose)
 
@@ -101,6 +115,7 @@ class ControllerManager:
             else:
                 self._done_evt.clear()
 
+        # Final safety stop on exit
         try:
             self._bridge.set_velocity(0.0, 0.0)
         except Exception:

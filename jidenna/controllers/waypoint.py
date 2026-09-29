@@ -11,9 +11,12 @@ Behavior:
 
 Conventions:
     - Works in the EKF/ROS frame: theta CCW+, w CCW+.
-    - The ControllerManager is responsible for translating w to the
-      hardware frame (Nano expects CW+), so this controller stays in
-      standard robotics convention.
+    - ControllerManager translates w to the hardware frame.
+
+Generation counter:
+    `set_target()` and `reset()` increment `_generation`. The manager
+    watches this counter to detect target changes and clear stale
+    `done` signals automatically.
 """
 
 from __future__ import annotations
@@ -50,6 +53,7 @@ class WaypointController:
         self._x_goal: Optional[float] = None
         self._y_goal: Optional[float] = None
         self._state = self.DONE
+        self._generation = 0
 
     # ---- public API -----------------------------------------------------
 
@@ -57,11 +61,16 @@ class WaypointController:
         self._x_goal = None
         self._y_goal = None
         self._state = self.DONE
+        self._generation += 1
 
     def set_target(self, x: float, y: float) -> None:
         self._x_goal = float(x)
         self._y_goal = float(y)
         self._state = self.ROTATE
+        self._generation += 1
+
+    def get_generation(self) -> int:
+        return self._generation
 
     def has_target(self) -> bool:
         return self._x_goal is not None
@@ -100,9 +109,6 @@ class WaypointController:
             if abs(heading_error) < self.heading_gate:
                 self._state = self.DRIVE
         elif self._state == self.DRIVE:
-            # Only re-enter ROTATE when we're far enough away that the
-            # target direction is meaningful. Prevents spinning at the
-            # goal where atan2(dy, dx) is dominated by noise.
             if (distance > 2.0 * self.goal_tolerance and
                 abs(heading_error) > self.heading_gate_wide):
                 self._state = self.ROTATE
@@ -113,8 +119,6 @@ class WaypointController:
             w = clamp(self.k_w * heading_error, -self.w_max, self.w_max)
         elif self._state == self.DRIVE:
             v = clamp(self.k_v * distance, -self.v_max, self.v_max)
-            # Fade w down near the goal so tiny geometry errors don't
-            # cause last-second spins.
             w_scale = min(1.0, distance / (4.0 * self.goal_tolerance))
             w = clamp(self.k_w * heading_error * w_scale,
                       -self.w_max, self.w_max)

@@ -15,7 +15,6 @@ Commands:
 """
 
 import math
-import sys
 import time
 from pathlib import Path
 
@@ -30,8 +29,8 @@ from jidenna.jidenna_logger      import CsvLogger
 # CONFIG — edit these
 # =============================================================================
 
-# PORT = "COM19"                       # or "/dev/ttyUSB0" on Linux
 PORT = "/dev/ttyUSB0"
+# PORT = "COM19"                       # or "/dev/ttyUSB0" on Linux
 
 V_MAX = 0.15                         # max forward speed (m/s)
 W_MAX = 0.50                         # max turn rate (rad/s)
@@ -167,7 +166,6 @@ def main() -> int:
     # ---- Interactive loop -----------------------------------------------
     try:
         while True:
-            # Read target from user
             try:
                 line = input("target> ").strip()
             except EOFError:
@@ -177,7 +175,6 @@ def main() -> int:
             if not line:
                 continue
 
-            # Commands
             low = line.lower()
             if low in ("q", "quit", "exit"):
                 print("Quitting.")
@@ -191,7 +188,6 @@ def main() -> int:
                 continue
             if low == "r":
                 pose.reset(0.0, 0.0, 0.0)
-                # Also reset Nano's odom so telemetry matches
                 bridge.reset_odometry()
                 time.sleep(0.3)
                 p = pose.get_pose()
@@ -199,7 +195,6 @@ def main() -> int:
                       f"th={math.degrees(p.th):+.1f}°")
                 continue
 
-            # Parse as a target
             tgt = parse_target(line)
             if tgt is None:
                 print(f"  Could not parse '{line}'. Type two numbers "
@@ -213,12 +208,9 @@ def main() -> int:
                   f"{math.degrees(p.th):+.1f}°)")
             print(f"Target      : ({tx:+.3f}, {ty:+.3f})  dist={dist:.3f} m")
 
-            # Drive to it
             mgr.start()   # no-op if already running
             run_waypoint(mgr, pose, ctrl, tx, ty,
                          GOAL_TOLERANCE, RUN_TIMEOUT_S, PRINT_HZ)
-            # Leave the manager running so it keeps sending 0,0 after done.
-            # (The controller reports done and commands v=w=0.)
 
     except KeyboardInterrupt:
         print("\nCtrl-C received. Stopping.")
