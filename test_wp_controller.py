@@ -21,7 +21,8 @@ from jidenna.jidenna_logger      import CsvLogger
 # CONFIG — edit these
 # =============================================================================
 
-PORT = "COM19"
+# PORT = "COM19"
+PORT = "/dev/ttyUSB0"
 
 TARGET_X = 01.0                      # waypoint x (m, relative to start)
 TARGET_Y = 0.00                      # waypoint y (m, relative to start)
