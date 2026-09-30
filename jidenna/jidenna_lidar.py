@@ -29,6 +29,17 @@ Notes:
       that belongs in the consumer.
     - This class only reads LiDAR data. It does NOT know about the robot,
       the pose, or the bridge.
+
+IMPORTANT (GIL note):
+    The YDLIDAR SDK's `doProcessSimple()` call does not release the Python
+    GIL during its execution. When the LiDAR is between scans, the SDK
+    returns False immediately, and a naive `if not ok: continue` becomes
+    a tight busy loop that starves every other thread in the process.
+
+    We insert `self._stop_evt.wait(0.005)` in the not-ok branch to yield
+    the GIL for 5 ms. This is invisible to the scan rate (100 ms/scan)
+    but lets the bridge reader thread, the controller thread, and the
+    pose estimator all keep running.
 """
 
 from __future__ import annotations
@@ -81,13 +92,14 @@ class Lidar:
     def __init__(self,
                  port: str,
                  baud: int = 115200,
-                 scan_hz: float = 5.0,
+                 scan_hz: float = 10.0,
                  sample_rate_khz: int = 3,
                  min_range_m: float = 0.08,
                  max_range_m: float = 8.0,
                  min_angle_deg: float = -180.0,
                  max_angle_deg: float =  180.0,
-                 reconnect_interval_s: float = 1.0):
+                 reconnect_interval_s: float = 1.0,
+                 idle_sleep_s: float = 0.005):
         self._port = port
         self._baud = baud
         self._scan_hz = scan_hz
@@ -97,10 +109,11 @@ class Lidar:
         self._min_angle = min_angle_deg
         self._max_angle = max_angle_deg
         self._reconnect_interval = reconnect_interval_s
+        self._idle_sleep = idle_sleep_s
 
         # SDK objects (created/recreated on connect)
         self._laser: Optional[ydlidar.CYdLidar] = None
-        self._scan_buffer = None   # SDK's internal scan object
+        self._scan_buffer = None
 
         # Threading
         self._thread: Optional[threading.Thread] = None
@@ -167,7 +180,7 @@ class Lidar:
             print(f"[lidar] initialize() failed on {self._port}")
             return False
 
-        time.sleep(0.5)   # SDK settle
+        time.sleep(0.5)
 
         if not laser.turnOn():
             print(f"[lidar] turnOn() failed on {self._port}")
@@ -216,19 +229,21 @@ class Lidar:
                 continue
 
             if not ok:
-                # SDK didn't produce a scan this tick — normal, just retry
+                # Critical: yield the GIL. Without this, the busy loop
+                # starves every other thread in the process.
+                self._stop_evt.wait(self._idle_sleep)
                 continue
 
-            # Check the OS-level state
             if not ydlidar.os_isOk():
                 print("[lidar] os_isOk() returned False, reconnecting")
                 self._disconnect()
                 self._stop_evt.wait(self._reconnect_interval)
                 continue
 
-            # Build the scan object
             scan = self._build_scan(self._scan_buffer)
             if scan is None:
+                # No valid points this cycle; also yield.
+                self._stop_evt.wait(self._idle_sleep)
                 continue
 
             self._last_scan_time = scan.t_host
@@ -240,6 +255,10 @@ class Lidar:
                 except Exception as e:
                     print(f"[lidar] callback error: {e}")
 
+            # Small yield at the end of every successful iteration too,
+            # so callbacks don't hog the GIL either.
+            self._stop_evt.wait(0.001)
+
         self._disconnect()
 
     def _build_scan(self, sdk_scan) -> Optional[LidarScan]:
@@ -247,7 +266,6 @@ class Lidar:
         if not pts:
             return None
 
-        # Preallocate for the valid points only
         angles = np.empty(len(pts), dtype=np.float64)
         ranges = np.empty(len(pts), dtype=np.float64)
 
@@ -256,7 +274,7 @@ class Lidar:
             r = p.range
             if r <= 0.0 or r < self._min_range or r > self._max_range:
                 continue
-            angles[n_valid] = p.angle       # radians (SDK)
+            angles[n_valid] = p.angle
             ranges[n_valid] = r
             n_valid += 1
 
@@ -266,7 +284,6 @@ class Lidar:
         angles = angles[:n_valid]
         ranges = ranges[:n_valid]
 
-        # Precompute (x, y) in the LiDAR's own frame
         xs = ranges * np.cos(angles)
         ys = ranges * np.sin(angles)
         points_xy = np.column_stack((xs, ys))
