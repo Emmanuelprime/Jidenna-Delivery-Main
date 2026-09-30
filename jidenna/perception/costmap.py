@@ -102,6 +102,7 @@ class Costmap:
 
         # Thread safety
         self._lock = threading.Lock()
+        
 
     # ---- public API -----------------------------------------------------
 
