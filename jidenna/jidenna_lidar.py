@@ -81,7 +81,7 @@ class Lidar:
     def __init__(self,
                  port: str,
                  baud: int = 115200,
-                 scan_hz: float = 10.0,
+                 scan_hz: float = 5.0,
                  sample_rate_khz: int = 3,
                  min_range_m: float = 0.08,
                  max_range_m: float = 8.0,
