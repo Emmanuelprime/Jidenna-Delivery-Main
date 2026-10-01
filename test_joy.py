@@ -88,7 +88,8 @@ def main() -> int:
             else:
                 st = rx.get_state()
                 v, w = sticks_to_vw(st, args.scheme,
-                                    args.v_max, args.w_max)
+                                    args.v_max, args.w_max,
+                                    invert_lx=True)
                 # Nano expects CW+ w; sticks_to_vw returns CCW+.
                 bridge.set_velocity(v, -w)
 
