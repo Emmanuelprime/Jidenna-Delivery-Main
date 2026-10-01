@@ -21,7 +21,7 @@ Layout:
     +--------------------------------------------------+----------------+
     status bar: bridge / lidar / pose / map stats
 
-Keyboard (when canvas has focus):
+Keyboard (when window has focus):
     W / S   : forward / backward
     A / D   : turn left / right
     Q / E   : spin in place CCW / CW
@@ -177,29 +177,33 @@ class CostmapGUI:
 
         ttk.Separator(right).pack(fill=tk.X, pady=10)
 
-        # Speed sliders
+        # ---- speed sliders ----
+        # NOTE: labels are created BEFORE the scales, because ttk.Scale fires
+        # its `command` callback during construction and on `.set()`. If the
+        # labels didn't exist yet, the callbacks would crash with
+        # AttributeError.
         ttk.Label(right, text="Linear speed (m/s)").pack(anchor="w")
+        self.v_label = ttk.Label(right, text="0.25")
+        self.v_label.pack(anchor="e")
         self.v_scale = ttk.Scale(right, from_=0.05, to=0.60,
                                  orient=tk.HORIZONTAL,
                                  command=self._on_v_scale)
         self.v_scale.set(0.25)
         self.v_scale.pack(fill=tk.X)
-        self.v_label = ttk.Label(right, text="0.25")
-        self.v_label.pack(anchor="e")
 
         ttk.Label(right, text="Angular speed (rad/s)").pack(anchor="w",
                                                             pady=(8, 0))
+        self.w_label = ttk.Label(right, text="0.40")
+        self.w_label.pack(anchor="e")
         self.w_scale = ttk.Scale(right, from_=0.10, to=1.50,
                                  orient=tk.HORIZONTAL,
                                  command=self._on_w_scale)
         self.w_scale.set(0.40)
         self.w_scale.pack(fill=tk.X)
-        self.w_label = ttk.Label(right, text="0.40")
-        self.w_label.pack(anchor="e")
 
         ttk.Separator(right).pack(fill=tk.X, pady=10)
 
-        # Map controls
+        # ---- map controls ----
         ttk.Button(right, text="Reset costmap",
                    command=self._reset_map).pack(fill=tk.X, pady=2)
         ttk.Button(right, text="Reset trajectory",
@@ -211,7 +215,7 @@ class CostmapGUI:
 
         ttk.Separator(right).pack(fill=tk.X, pady=10)
 
-        # Stats
+        # ---- stats ----
         ttk.Label(right, text="Map stats",
                   font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
         self.stats_label = ttk.Label(right, text="—", justify="left")
@@ -224,7 +228,10 @@ class CostmapGUI:
         status.pack(side=tk.BOTTOM, fill=tk.X)
 
     def _bind_keys(self) -> None:
-        self.canvas.focus_set()
+        # Don't force focus to the canvas only; bind on root so WASD works
+        # regardless of which widget has focus (except entries, of which
+        # there are none here).
+        self.root.focus_set()
 
         def bind(key, fn):
             self.root.bind(key, lambda e: fn())
@@ -244,6 +251,8 @@ class CostmapGUI:
         self.root.bind("<KeyRelease-s>", lambda e: self._stop())
         self.root.bind("<KeyRelease-a>", lambda e: self._stop())
         self.root.bind("<KeyRelease-d>", lambda e: self._stop())
+        self.root.bind("<KeyRelease-q>", lambda e: self._stop())
+        self.root.bind("<KeyRelease-e>", lambda e: self._stop())
 
     # ---- motion commands -------------------------------------------------
 
@@ -263,11 +272,14 @@ class CostmapGUI:
 
     def _on_v_scale(self, val: str) -> None:
         self.v_step = float(val)
-        self.v_label.config(text=f"{self.v_step:.2f}")
+        # Guard in case the callback fires before the label exists.
+        if hasattr(self, "v_label"):
+            self.v_label.config(text=f"{self.v_step:.2f}")
 
     def _on_w_scale(self, val: str) -> None:
         self.w_step = float(val)
-        self.w_label.config(text=f"{self.w_step:.2f}")
+        if hasattr(self, "w_label"):
+            self.w_label.config(text=f"{self.w_step:.2f}")
 
     # ---- bridge / lidar callbacks (fire on background threads) ----------
 
@@ -313,9 +325,7 @@ class CostmapGUI:
         prob = self.cm.probability_grid()   # (ny, nx), float in [0,1]
         ny, nx = prob.shape
 
-        # Resize to the canvas using nearest-neighbour if we don't have PIL.
-        # Tkinter's PhotoImage is slow for big images, so we downsample.
-        # Target ~400 px to keep the redraw snappy.
+        # Downsample to keep Tk's PhotoImage happy. Target ~400 px.
         target = 400
         if nx > target or ny > target:
             step_x = max(1, nx // target)
@@ -326,16 +336,9 @@ class CostmapGUI:
 
         sh, sw = small.shape
 
-        # Build a PPM (P6) byte string — Tkinter can read this directly
-        # via PhotoImage(data=..., format="PPM").
-        # Map probability -> gray:
-        #   0.0 (free)      -> white
-        #   0.5 (unknown)   -> dark gray
-        #   1.0 (occupied)  -> black
-        rgb = np.empty((sh, sw, 3), dtype=np.uint8)
-        # unknown cells (prob ~0.5) drawn dark to distinguish from free
-        # free cells brighter, occupied black.
+        # Build a PPM (P6) byte string — Tkinter can read this directly.
         v = np.clip(prob_to_gray(small), 0, 255).astype(np.uint8)
+        rgb = np.empty((sh, sw, 3), dtype=np.uint8)
         rgb[..., 0] = v
         rgb[..., 1] = v
         rgb[..., 2] = v
@@ -349,7 +352,6 @@ class CostmapGUI:
             try:
                 self._img.configure(data=ppm_data, format="PPM")
             except tk.TclError:
-                # If configure isn't supported on this Tk version, recreate.
                 self._img = tk.PhotoImage(data=ppm_data, format="PPM")
 
         # Clear canvas
@@ -360,8 +362,6 @@ class CostmapGUI:
         self.canvas.create_image(cx, cy, image=self._img, anchor=tk.CENTER)
 
         # Overlay trajectory. Map world -> canvas.
-        # The world extent is [origin_x, origin_x+size_x] x [...+size_y].
-        # Our image is drawn centered; scale to `side` px.
         px_per_m = side / self.cm.size_x
         ox = cx - side / 2
         oy = cy - side / 2
@@ -414,7 +414,7 @@ class CostmapGUI:
             self.canvas.create_line(pxN, pyN, ex, ey,
                                     fill="#ffff00", width=3)
 
-        # Corner text: origin at (0,0) of odom
+        # Odom origin marker
         px0, py0 = world_to_canvas(0.0, 0.0)
         self.canvas.create_oval(px0 - 3, py0 - 3, px0 + 3, py0 + 3,
                                 fill="#c080ff", outline="")
@@ -535,12 +535,10 @@ def prob_to_gray(prob: np.ndarray) -> np.ndarray:
         0.5 (unknown)   -> mid gray (~ 70)
         1.0 (occupied)  -> black  (  0)
 
-    Because log-odds start at zero, unknown cells render as dark gray,
-    which lets you distinguish "not yet seen" from "seen and free".
+    Unknown cells render as dark gray, which lets you distinguish
+    "not yet seen" from "seen and free".
     """
     p = np.clip(prob, 0.0, 1.0)
-    # piecewise: 0->230, 0.5->70, 1->0
-    # Use two linear segments.
     out = np.where(
         p <= 0.5,
         230.0 - p * (230.0 - 70.0) / 0.5,
