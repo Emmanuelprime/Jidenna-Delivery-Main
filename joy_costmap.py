@@ -34,7 +34,7 @@ from jidenna.jidenna_bridge import JidennaBridge
 from jidenna.jidenna_lidar  import Lidar, LidarScan
 from jidenna.jidenna_pose   import JidennaPose, PoseEstimate
 from jidenna.perception.costmap import Costmap
-from jidenna.joy_receiver import JoyReceiver, sticks_to_vw
+from jidenna.controllers.joy_receiver import JoyReceiver, sticks_to_vw
 
 
 # ---------------------------------------------------------------------------
