@@ -1,19 +1,15 @@
 """
 gui.py
 
-Interactive costmap GUI with joystick control.
+Live costmap viewer with joystick control.
 
-- Left panel: live costmap + trajectory overlay.
-- Right panel: WASD buttons, speed sliders, arm/disarm toggle, save buttons.
-- Joystick (UDP from joy_firmware.ino): drives the robot when armed.
-  When armed, WASD keys are ignored so the two sources don't fight.
+- Left panel: live costmap + trajectory overlay (only UI element besides status).
+- Joystick (UDP from joy_firmware.ino) drives the robot automatically.
+- Deadman: if no UDP packets for --joy-timeout seconds, robot stops.
 
 Keyboard:
-    W / S   : forward / backward  (only when joystick disarmed)
-    A / D   : turn left / right   (only when joystick disarmed)
-    Space   : stop
-    R       : reset costmap
-    Esc     : quit
+    R   : reset costmap
+    Esc : quit
 
 Usage:
     python gui.py --port /dev/ttyUSB0 --lidar /dev/ttyUSB1 --udp-port 4210
@@ -38,15 +34,7 @@ from jidenna.jidenna_bridge import JidennaBridge
 from jidenna.jidenna_lidar  import Lidar, LidarScan
 from jidenna.jidenna_pose   import JidennaPose, PoseEstimate
 from jidenna.perception.costmap import Costmap
-from jidenna.controllers.joy_receiver import JoyReceiver, sticks_to_vw
-
-try:
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    HAVE_MPL = True
-except ImportError:
-    HAVE_MPL = False
+from jidenna.joy_receiver import JoyReceiver, sticks_to_vw
 
 
 # ---------------------------------------------------------------------------
@@ -65,7 +53,6 @@ class CostmapGUI:
                  lidar: Lidar,
                  costmap: Costmap,
                  joy_rx: JoyReceiver,
-                 out_prefix: Path,
                  joy_v_max: float = 0.30,
                  joy_w_max: float = 0.80,
                  joy_timeout_s: float = 0.5,
@@ -77,30 +64,20 @@ class CostmapGUI:
         self.lidar = lidar
         self.cm = costmap
         self.joy_rx = joy_rx
-        self.out_prefix = out_prefix
 
         self.joy_v_max = joy_v_max
         self.joy_w_max = joy_w_max
         self.joy_timeout_s = joy_timeout_s
         self.joy_scheme = joy_scheme
         self.joy_invert_lx = joy_invert_lx
-        self.joy_armed = False
         self._joy_last_send = 0.0
 
-        # Keyboard motion state
-        self.v_cmd = 0.0
-        self.w_cmd = 0.0
-        self.v_step = 0.25
-        self.w_step = 0.40
-
-        # Trajectory overlay
         self.traj: list[tuple[float, float, float]] = []
         self.traj_lock = threading.Lock()
         self.latest_pose = PoseEstimate()
         self.pose_lock = threading.Lock()
 
         self._img: Optional[tk.PhotoImage] = None
-
         self._last_stats_time = 0.0
 
         self._build_ui()
@@ -114,96 +91,14 @@ class CostmapGUI:
     # ---- UI ---------------------------------------------------------------
 
     def _build_ui(self) -> None:
-        self.root.title("Jidenna Costmap + Joystick")
-        self.root.geometry("1200x820")
-        self.root.minsize(800, 600)
+        self.root.title("Jidenna Costmap")
+        self.root.geometry("1000x900")
+        self.root.minsize(600, 600)
 
-        left = ttk.Frame(self.root, padding=4)
-        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        self.canvas = tk.Canvas(left, background="#202020",
+        self.canvas = tk.Canvas(self.root, background="#202020",
                                 highlightthickness=0)
         self.canvas.pack(fill=tk.BOTH, expand=True)
 
-        right = ttk.Frame(self.root, padding=8, width=260)
-        right.pack(side=tk.RIGHT, fill=tk.Y)
-        right.pack_propagate(False)
-
-        # --- Joystick ---
-        ttk.Label(right, text="Joystick",
-                  font=("TkDefaultFont", 12, "bold")).pack(pady=(0, 6))
-
-        self.joy_armed_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(right, text="Armed (drives robot)",
-                        variable=self.joy_armed_var,
-                        command=self._on_joy_arm_toggle).pack(fill=tk.X)
-
-        self.joy_readout = ttk.Label(right, text="—", justify="left")
-        self.joy_readout.pack(anchor="w", pady=(4, 8))
-
-        ttk.Separator(right).pack(fill=tk.X, pady=6)
-
-        # --- Keyboard ---
-        ttk.Label(right, text="Keyboard",
-                  font=("TkDefaultFont", 12, "bold")).pack(pady=(0, 6))
-
-        grid = ttk.Frame(right)
-        grid.pack()
-
-        def btn(text, r, c, cmd, width=6):
-            b = ttk.Button(grid, text=text, command=cmd, width=width)
-            b.grid(row=r, column=c, padx=2, pady=2, sticky="nsew")
-
-        btn("↑", 0, 1, lambda: self._set_motion(self.v_step, 0.0))
-        btn("←", 1, 0, lambda: self._set_motion(0.0,  self.w_step))
-        btn("STOP", 1, 1, self._stop)
-        btn("→", 1, 2, lambda: self._set_motion(0.0, -self.w_step))
-        btn("↓", 2, 1, lambda: self._set_motion(-self.v_step, 0.0))
-
-        for i in range(3):
-            grid.columnconfigure(i, weight=1)
-
-        # Speed sliders (labels before scales — scale fires callback on set)
-        ttk.Label(right, text="Linear speed (m/s)").pack(anchor="w",
-                                                        pady=(8, 0))
-        self.v_label = ttk.Label(right, text="0.25")
-        self.v_label.pack(anchor="e")
-        self.v_scale = ttk.Scale(right, from_=0.05, to=0.60,
-                                 orient=tk.HORIZONTAL,
-                                 command=self._on_v_scale)
-        self.v_scale.set(0.25)
-        self.v_scale.pack(fill=tk.X)
-
-        ttk.Label(right, text="Angular speed (rad/s)").pack(anchor="w",
-                                                            pady=(8, 0))
-        self.w_label = ttk.Label(right, text="0.40")
-        self.w_label.pack(anchor="e")
-        self.w_scale = ttk.Scale(right, from_=0.10, to=1.50,
-                                 orient=tk.HORIZONTAL,
-                                 command=self._on_w_scale)
-        self.w_scale.set(0.40)
-        self.w_scale.pack(fill=tk.X)
-
-        ttk.Separator(right).pack(fill=tk.X, pady=8)
-
-        # --- Map controls ---
-        ttk.Button(right, text="Reset costmap",
-                   command=self._reset_map).pack(fill=tk.X, pady=2)
-        ttk.Button(right, text="Reset trajectory",
-                   command=self._reset_traj).pack(fill=tk.X, pady=2)
-        ttk.Button(right, text="Save PNG",
-                   command=self._save_png).pack(fill=tk.X, pady=2)
-        ttk.Button(right, text="Save NPY",
-                   command=self._save_npy).pack(fill=tk.X, pady=2)
-
-        ttk.Separator(right).pack(fill=tk.X, pady=8)
-
-        ttk.Label(right, text="Map stats",
-                  font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
-        self.stats_label = ttk.Label(right, text="—", justify="left")
-        self.stats_label.pack(anchor="w", pady=4)
-
-        # --- Status bar ---
         self.status_var = tk.StringVar(value="starting…")
         status = ttk.Label(self.root, textvariable=self.status_var,
                            relief=tk.SUNKEN, anchor="w", padding=4)
@@ -211,71 +106,18 @@ class CostmapGUI:
 
     def _bind_keys(self) -> None:
         self.root.focus_set()
-
-        def bind(key, fn):
-            self.root.bind(key, lambda e: fn())
-
-        bind("<KeyPress-w>", lambda: self._set_motion(self.v_step, 0.0))
-        bind("<KeyPress-s>", lambda: self._set_motion(-self.v_step, 0.0))
-        bind("<KeyPress-a>", lambda: self._set_motion(0.0,  self.w_step))
-        bind("<KeyPress-d>", lambda: self._set_motion(0.0, -self.w_step))
-        bind("<KeyPress-space>", self._stop)
-        bind("<KeyPress-r>", self._reset_map)
-        bind("<Escape>", self._quit)
-
-        self.root.bind("<KeyRelease-w>", lambda e: self._stop())
-        self.root.bind("<KeyRelease-s>", lambda e: self._stop())
-        self.root.bind("<KeyRelease-a>", lambda e: self._stop())
-        self.root.bind("<KeyRelease-d>", lambda e: self._stop())
-
-    # ---- motion ----------------------------------------------------------
-
-    def _set_motion(self, v: float, w_ccw: float) -> None:
-        # Joystick takes priority: ignore keyboard when it's armed.
-        if self.joy_armed:
-            return
-        self.v_cmd = v
-        self.w_cmd = w_ccw
-        try:
-            self.bridge.set_velocity(v, -w_ccw)
-        except Exception as e:
-            self._set_status(f"set_velocity failed: {e}")
-
-    def _stop(self) -> None:
-        self.v_cmd = 0.0
-        self.w_cmd = 0.0
-        try:
-            self.bridge.set_velocity(0.0, 0.0)
-        except Exception:
-            pass
-
-    def _on_v_scale(self, val: str) -> None:
-        self.v_step = float(val)
-        if hasattr(self, "v_label"):
-            self.v_label.config(text=f"{self.v_step:.2f}")
-
-    def _on_w_scale(self, val: str) -> None:
-        self.w_step = float(val)
-        if hasattr(self, "w_label"):
-            self.w_label.config(text=f"{self.w_step:.2f}")
+        self.root.bind("<KeyPress-r>", lambda e: self._reset_map())
+        self.root.bind("<Escape>", lambda e: self._quit())
 
     # ---- joystick --------------------------------------------------------
 
-    def _on_joy_arm_toggle(self) -> None:
-        self.joy_armed = self.joy_armed_var.get()
-        if not self.joy_armed:
-            self._stop()
-        self._set_status(f"joystick {'ARMED' if self.joy_armed else 'disarmed'}")
-
     def _update_joystick(self) -> None:
-        """Called from _tick at GUI rate. Sends at most 20 Hz."""
+        """Called from _tick. Sends at most 20 Hz."""
         now = time.time()
         if now - self._joy_last_send < 0.05:
             return
         self._joy_last_send = now
 
-        if not self.joy_armed:
-            return
         if self.joy_rx.last_rx_age_s() > self.joy_timeout_s:
             try:
                 self.bridge.set_velocity(0.0, 0.0)
@@ -310,7 +152,7 @@ class CostmapGUI:
         except Exception as e:
             print(f"[costmap] integrate_scan error: {e}")
 
-    # ---- refresh loop ----------------------------------------------------
+    # ---- refresh --------------------------------------------------------
 
     def _tick(self) -> None:
         try:
@@ -334,7 +176,7 @@ class CostmapGUI:
         prob = self.cm.probability_grid()
         ny, nx = prob.shape
 
-        target = 400
+        target = 500
         if nx > target or ny > target:
             sx = max(1, nx // target)
             sy = max(1, ny // target)
@@ -407,122 +249,55 @@ class CostmapGUI:
                                     pyN - L * math.sin(thN),
                                     fill="#ffff00", width=3)
 
+        # Odom origin
         px0, py0 = w2c(0.0, 0.0)
         self.canvas.create_oval(px0 - 3, py0 - 3, px0 + 3, py0 + 3,
                                 fill="#c080ff", outline="")
 
     def _update_status(self) -> None:
         now = time.time()
-        if now - self._last_stats_time < 0.5:
+        if now - self._last_stats_time < 0.25:
             return
         self._last_stats_time = now
 
         prob = self.cm.probability_grid()
         occ = int(np.sum(prob > 0.6))
         free = int(np.sum(prob < 0.4))
-        unk = prob.size - occ - free
-
-        self.stats_label.config(
-            text=(f"occupied: {occ:>7d}\n"
-                  f"free    : {free:>7d}\n"
-                  f"unknown : {unk:>7d}\n"
-                  f"total   : {prob.size:>7d}")
-        )
-
-        # Joystick readout
-        st = self.joy_rx.get_state()
-        age = self.joy_rx.last_rx_age_s()
-        if age == float("inf"):
-            joy_line = "no packets"
-        elif age > self.joy_timeout_s:
-            joy_line = f"STALE ({age*1000:.0f} ms)"
-        else:
-            joy_line = (f"lx={st.lx:+.2f} ly={st.ly:+.2f}\n"
-                        f"rx={st.rx:+.2f} ry={st.ry:+.2f}\n"
-                        f"pkt={self.joy_rx.packet_count()}")
-        self.joy_readout.config(text=joy_line)
 
         with self.pose_lock:
             p = self.latest_pose
 
+        st = self.joy_rx.get_state()
+        age = self.joy_rx.last_rx_age_s()
+        if age == float("inf"):
+            joy = "no pkt"
+        elif age > self.joy_timeout_s:
+            joy = f"STALE {age*1000:.0f}ms"
+        else:
+            joy = f"ly={st.ly:+.2f} lx={st.lx:+.2f}"
+
         nano = "OK" if self.bridge.is_connected() else "DOWN"
         lidar = "OK" if self.lidar.is_connected() else "DOWN"
-        source = "JOY" if self.joy_armed else "kbd"
 
         self._set_status(
-            f"Nano: {nano}  LiDAR: {lidar}  src: {source}  "
-            f"pose: x={p.x:+.2f} y={p.y:+.2f} "
+            f"nano:{nano}  lidar:{lidar}  joy:{joy}  "
+            f"pose x={p.x:+.2f} y={p.y:+.2f} "
             f"th={math.degrees(p.th):+.1f}°  "
-            f"scans: {self.lidar.scan_count()}"
+            f"occ:{occ} free:{free}  "
+            f"scans:{self.lidar.scan_count()}   [R]eset  [Esc]quit"
         )
 
     def _set_status(self, text: str) -> None:
         self.status_var.set(text)
 
-    # ---- actions ---------------------------------------------------------
-
     def _reset_map(self) -> None:
         self.cm.reset()
-        self._set_status("costmap reset")
-
-    def _reset_traj(self) -> None:
         with self.traj_lock:
             self.traj.clear()
-        self._set_status("trajectory reset")
-
-    def _save_png(self) -> None:
-        if not HAVE_MPL:
-            messagebox.showerror("Save PNG", "matplotlib not available")
-            return
-        path = self.out_prefix.with_suffix(".png")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            self._render_save_png(path)
-            self._set_status(f"saved {path}")
-        except Exception as e:
-            messagebox.showerror("Save PNG", str(e))
-
-    def _render_save_png(self, path: Path) -> None:
-        prob = self.cm.probability_grid()
-        with self.traj_lock:
-            traj = list(self.traj)
-
-        fig, ax = plt.subplots(figsize=(10, 10))
-        extent = [self.cm.origin_x, self.cm.origin_x + self.cm.size_x,
-                  self.cm.origin_y, self.cm.origin_y + self.cm.size_y]
-        ax.imshow(prob, origin="lower", extent=extent,
-                  cmap="gray_r", vmin=0.0, vmax=1.0,
-                  interpolation="nearest")
-        if traj:
-            xs = [t[0] for t in traj]
-            ys = [t[1] for t in traj]
-            ax.plot(xs, ys, "-r", linewidth=2, label="trajectory")
-            ax.plot(xs[0], ys[0], "go", markersize=10, label="start")
-            ax.plot(xs[-1], ys[-1], "ro", markersize=10, label="end")
-            step = max(1, len(traj) // 30)
-            for (x, y, th) in traj[::step]:
-                ax.arrow(x, y, 0.15 * math.cos(th), 0.15 * math.sin(th),
-                         head_width=0.05, head_length=0.05,
-                         fc="blue", ec="blue", alpha=0.6)
-            ax.legend(loc="upper right")
-        ax.set_xlabel("x [m] (odom)")
-        ax.set_ylabel("y [m] (odom)")
-        ax.set_title("Jidenna costmap")
-        ax.set_aspect("equal")
-        ax.grid(True, alpha=0.3)
-        plt.tight_layout()
-        fig.savefig(path, dpi=120)
-        plt.close(fig)
-
-    def _save_npy(self) -> None:
-        path = self.out_prefix.with_suffix(".npy")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        np.save(path, self.cm.snapshot())
-        self._set_status(f"saved {path}")
+        self._set_status("reset")
 
     def _quit(self) -> None:
-        self._stop()
-        self.root.after(100, self.root.destroy)
+        self.root.after(50, self.root.destroy)
 
 
 # ---------------------------------------------------------------------------
@@ -543,9 +318,9 @@ def prob_to_gray(prob: np.ndarray) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Costmap GUI + joystick")
-    ap.add_argument("--port",  required=True, help="Nano serial port")
-    ap.add_argument("--lidar", required=True, help="LiDAR serial port")
+    ap = argparse.ArgumentParser(description="Costmap viewer + joystick")
+    ap.add_argument("--port",  required=True)
+    ap.add_argument("--lidar", required=True)
     ap.add_argument("--baud",  type=int, default=115200)
     ap.add_argument("--udp-port", type=int, default=4210)
     ap.add_argument("--bind", default="0.0.0.0")
@@ -555,15 +330,11 @@ def main() -> int:
     ap.add_argument("--joy-w-max", type=float, default=0.80)
     ap.add_argument("--joy-timeout", type=float, default=0.5)
     ap.add_argument("--joy-invert-lx", action="store_true")
-    ap.add_argument("--out", default="runs/costmap_gui")
     ap.add_argument("--size", type=float, default=15.0)
     ap.add_argument("--resolution", type=float, default=0.05)
     ap.add_argument("--lidar-dx", type=float, default=-0.432)
     ap.add_argument("--lidar-dy", type=float, default=0.0)
     args = ap.parse_args()
-
-    out_prefix = Path(args.out)
-    out_prefix.parent.mkdir(parents=True, exist_ok=True)
 
     cm = Costmap(
         resolution=args.resolution,
@@ -578,7 +349,7 @@ def main() -> int:
     joy_rx = JoyReceiver(udp_port=args.udp_port, bind_addr=args.bind)
 
     root = tk.Tk()
-    gui = CostmapGUI(root, bridge, pose, lidar, cm, joy_rx, out_prefix,
+    gui = CostmapGUI(root, bridge, pose, lidar, cm, joy_rx,
                      joy_v_max=args.joy_v_max,
                      joy_w_max=args.joy_w_max,
                      joy_timeout_s=args.joy_timeout,
@@ -615,7 +386,7 @@ def main() -> int:
             root.after(0, gui._quit)
             return
 
-        gui._set_status("opening UDP for joystick…")
+        gui._set_status("opening UDP…")
         joy_rx.start()
         time.sleep(0.3)
         if joy_rx.bind_failed():
@@ -624,7 +395,7 @@ def main() -> int:
             root.after(0, gui._quit)
             return
 
-        gui._set_status("ready — arm the joystick to drive")
+        gui._set_status("ready — move the joystick")
 
     threading.Thread(target=startup, daemon=True).start()
 
